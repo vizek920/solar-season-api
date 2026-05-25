@@ -15,7 +15,18 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:5173', 'https://solar-season.vercel.app', process.env.FRONTEND_URL].filter(Boolean),
+  origin: function(origin, callback) {
+    const allowed = [
+      'http://localhost:5173',
+      'https://solar-season-frontend.vercel.app',
+      process.env.FRONTEND_URL
+    ];
+    if (!origin || allowed.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
