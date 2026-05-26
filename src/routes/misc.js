@@ -11,8 +11,8 @@ notifRouter.get('/', authClan, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT * FROM notifications
-       WHERE (clan_id = $1 OR is_global = true) AND clan_id IS NOT NULL OR is_global = true
-       ORDER BY created_at DESC LIMIT 30`,
+       WHERE clan_id = $1 OR is_global = true
+       ORDER BY created_at DESC LIMIT 50`,
       [req.clan.id]
     );
     res.json(result.rows);
@@ -24,7 +24,8 @@ notifRouter.get('/', authClan, async (req, res) => {
 notifRouter.get('/unread-count', authClan, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT COUNT(*) FROM notifications WHERE (clan_id = $1 OR is_global = true) AND is_read = false`,
+      `SELECT COUNT(*) FROM notifications 
+       WHERE (clan_id = $1 OR is_global = true) AND is_read = false`,
       [req.clan.id]
     );
     res.json({ count: parseInt(result.rows[0].count) });
@@ -33,25 +34,30 @@ notifRouter.get('/unread-count', authClan, async (req, res) => {
   }
 });
 
-notifRouter.patch('/:id/read', authClan, async (req, res) => {
-  try {
-    await pool.query('UPDATE notifications SET is_read = true WHERE id = $1 AND clan_id = $2', [req.params.id, req.clan.id]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
 notifRouter.patch('/read-all', authClan, async (req, res) => {
   try {
-    await pool.query('UPDATE notifications SET is_read = true WHERE clan_id = $1', [req.clan.id]);
+    await pool.query(
+      'UPDATE notifications SET is_read = true WHERE clan_id = $1 OR is_global = true',
+      [req.clan.id]
+    );
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// إرسال إشعار عام (أدمن)
+notifRouter.patch('/:id/read', authClan, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE notifications SET is_read = true WHERE id = $1',
+      [req.params.id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 notifRouter.post('/broadcast', authAdmin, async (req, res) => {
   const { title, message, type } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
@@ -89,15 +95,31 @@ seasonRouter.get('/active', async (req, res) => {
 });
 
 seasonRouter.post('/', authAdmin, async (req, res) => {
-  const { name, description, start_at, end_at } = req.body;
+  const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
   try {
     const result = await pool.query(
-      'INSERT INTO seasons (name, description, start_at, end_at) VALUES ($1, $2, $3, $4) RETURNING *',
-      [name, description, start_at, end_at]
+      'INSERT INTO seasons (name, description) VALUES ($1, $2) RETURNING *',
+      [name, description || null]
     );
     await audit('season_created', req.admin.username, 'season', result.rows[0].id, { name }, req.ip);
     res.status(201).json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+seasonRouter.patch('/:id', authAdmin, async (req, res) => {
+  const { name, description } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE seasons SET
+        name = COALESCE($1, name),
+        description = COALESCE($2, description)
+       WHERE id = $3 RETURNING *`,
+      [name, description, req.params.id]
+    );
+    res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -114,10 +136,30 @@ seasonRouter.patch('/:id/activate', authAdmin, async (req, res) => {
   }
 });
 
+seasonRouter.patch('/:id/deactivate', authAdmin, async (req, res) => {
+  try {
+    await pool.query('UPDATE seasons SET is_active = false WHERE id = $1', [req.params.id]);
+    await audit('season_deactivated', req.admin.username, 'season', req.params.id, null, req.ip);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// إعادة ضبط XP كل الكلانات (للانتقال لسيزون جديد)
+seasonRouter.post('/:id/reset-xp', authSuperAdmin, async (req, res) => {
+  try {
+    await pool.query('UPDATE clans SET xp = 0, immunity_count = 0, is_eliminated = false');
+    await audit('season_xp_reset', req.admin.username, 'season', req.params.id, null, req.ip);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ===== ADMIN MANAGEMENT =====
 const adminRouter = require('express').Router();
 
-// إنشاء أدمن جديد (superadmin فقط)
 adminRouter.post('/', authSuperAdmin, async (req, res) => {
   const { username, email, password, role, discord_id } = req.body;
   if (!username || !email || !password) return res.status(400).json({ error: 'Missing fields' });
@@ -135,17 +177,17 @@ adminRouter.post('/', authSuperAdmin, async (req, res) => {
   }
 });
 
-// قائمة الأدمنز
 adminRouter.get('/', authSuperAdmin, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, username, email, role, discord_id, is_active, created_at FROM admins ORDER BY created_at');
+    const result = await pool.query(
+      'SELECT id, username, email, role, discord_id, is_active, created_at FROM admins ORDER BY created_at'
+    );
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Audit log (superadmin)
 adminRouter.get('/audit-log', authSuperAdmin, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 100');
@@ -155,7 +197,6 @@ adminRouter.get('/audit-log', authSuperAdmin, async (req, res) => {
   }
 });
 
-// إحصائيات عامة
 adminRouter.get('/stats', authAdmin, async (req, res) => {
   try {
     const [clans, tasks, submissions, pending] = await Promise.all([
@@ -169,6 +210,33 @@ adminRouter.get('/stats', authAdmin, async (req, res) => {
       total_tasks: parseInt(tasks.rows[0].count),
       total_submissions: parseInt(submissions.rows[0].count),
       pending_reviews: parseInt(pending.rows[0].count)
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Big Screen data
+adminRouter.get('/bigscreen', async (req, res) => {
+  try {
+    const [clans, season, tasks] = await Promise.all([
+      pool.query(`
+        SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url,
+               RANK() OVER (ORDER BY xp DESC) as rank
+        FROM clans WHERE is_active = true ORDER BY xp DESC LIMIT 20
+      `),
+      pool.query('SELECT * FROM seasons WHERE is_active = true LIMIT 1'),
+      pool.query(`
+        SELECT id, title, card_category, xp_reward, difficulty, deadline, is_frozen
+        FROM tasks WHERE is_active = true AND is_frozen = false
+        AND (deadline IS NULL OR deadline > NOW())
+        ORDER BY created_at DESC LIMIT 5
+      `)
+    ]);
+    res.json({
+      clans: clans.rows,
+      season: season.rows[0] || null,
+      tasks: tasks.rows
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
