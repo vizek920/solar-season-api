@@ -180,16 +180,18 @@ router.patch('/:id/eliminate', authAdmin, async (req, res) => {
 });
 
 router.patch('/:id', authAdmin, async (req, res) => {
-  const { name, discord_id, logo_url } = req.body;
+  const { name, discord_id, logo_url, card_type } = req.body;
   try {
     const result = await pool.query(
       `UPDATE clans SET
         name = COALESCE($1, name),
         discord_id = COALESCE($2, discord_id),
-        logo_url = COALESCE($3, logo_url)
-       WHERE id = $4 RETURNING id, name`,
-      [name, discord_id, logo_url, req.params.id]
+        logo_url = COALESCE($3, logo_url),
+        card_type = COALESCE($4, card_type)
+       WHERE id = $5 RETURNING id, name, card_type`,
+      [name, discord_id, logo_url, card_type, req.params.id]
     );
+    await audit('clan_updated', req.admin.username, 'clan', req.params.id, { name, card_type }, req.ip);
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
@@ -207,4 +209,3 @@ router.delete('/:id', authSuperAdmin, async (req, res) => {
 });
 
 module.exports = router;
- 
