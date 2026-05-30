@@ -80,6 +80,58 @@ router.post('/submit', authBot, async (req, res) => {
   }
 });
 
+// مراجعة تقديم من البوت
+router.post('/review', authBot, async (req, res) => {
+  const { submission_id, is_approved, note, reviewer_tag } = req.body;
+  if (!submission_id || is_approved === undefined) return res.status(400).json({ error: 'Missing fields' });
+
+  try {
+    await pool.query('BEGIN');
+
+    const subResult = await pool.query(
+      `SELECT ts.*, t.xp_reward, t.title, c.name as clan_name
+       FROM task_submissions ts 
+       JOIN tasks t ON ts.task_id = t.id 
+       JOIN clans c ON ts.clan_id = c.id
+       WHERE ts.id = $1`,
+      [submission_id]
+    );
+    const sub = subResult.rows[0];
+    if (!sub) { await pool.query('ROLLBACK'); return res.status(404).json({ error: 'Submission not found' }); }
+
+    const newStatus = is_approved ? 'approved' : 'rejected';
+    await pool.query('UPDATE task_submissions SET status = $1 WHERE id = $2', [newStatus, submission_id]);
+
+    await pool.query(
+      'INSERT INTO task_reviews (submission_id, reviewer_discord_id, is_approved, note) VALUES ($1, $2, $3, $4)',
+      [submission_id, reviewer_tag || 'Discord Bot', is_approved, note || null]
+    );
+
+    if (is_approved) {
+      await pool.query('UPDATE clans SET xp = xp + $1 WHERE id = $2', [sub.xp_reward, sub.clan_id]);
+      await pool.query(
+        'INSERT INTO xp_log (clan_id, amount, reason, changed_by, task_id) VALUES ($1, $2, $3, $4, $5)',
+        [sub.clan_id, sub.xp_reward, `Task: ${sub.title}`, reviewer_tag || 'Discord', sub.task_id]
+      );
+    }
+
+    await pool.query(
+      `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, $4)`,
+      [sub.clan_id,
+       is_approved ? '✅ تم قبول إجابتك!' : '❌ تم رفض إجابتك',
+       is_approved ? `تهانينا! إجابتك على "${sub.title}" قُبلت وحصلت على ${sub.xp_reward} XP` : `للأسف إجابتك على "${sub.title}" رُفضت. ${note || ''}`,
+       is_approved ? 'success' : 'danger']
+    );
+
+    await pool.query('COMMIT');
+    res.json({ success: true, xp_awarded: is_approved ? sub.xp_reward : 0, clan: sub.clan_name });
+  } catch (err) {
+    await pool.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // السيزون النشط (للبوت)
 router.get('/season', authBot, async (req, res) => {
   try {
