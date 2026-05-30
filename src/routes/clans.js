@@ -8,7 +8,7 @@ const { audit } = require('../utils/audit');
 router.get('/leaderboard', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url,
+      SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url, discord_id,
              RANK() OVER (ORDER BY xp DESC) as rank
       FROM clans WHERE is_active = true ORDER BY xp DESC
     `);
@@ -182,18 +182,21 @@ router.patch('/:id/eliminate', authAdmin, async (req, res) => {
 router.patch('/:id', authAdmin, async (req, res) => {
   const { name, discord_id, logo_url, card_type } = req.body;
   try {
+    // نستخدم NULLIF لتجنب تخزين string فارغ
     const result = await pool.query(
       `UPDATE clans SET
-        name = COALESCE($1, name),
-        discord_id = COALESCE($2, discord_id),
-        logo_url = COALESCE($3, logo_url),
-        card_type = COALESCE($4, card_type)
-       WHERE id = $5 RETURNING id, name, card_type`,
-      [name, discord_id, logo_url, card_type, req.params.id]
+        name = COALESCE(NULLIF($1, ''), name),
+        discord_id = CASE WHEN $2::text IS NOT NULL THEN NULLIF($2, '') ELSE discord_id END,
+        logo_url = COALESCE(NULLIF($3, ''), logo_url),
+        card_type = COALESCE(NULLIF($4, ''), card_type)
+       WHERE id = $5 RETURNING id, name, card_type, discord_id`,
+      [name || null, discord_id !== undefined ? discord_id : null, logo_url || null, card_type || null, req.params.id]
     );
-    await audit('clan_updated', req.admin.username, 'clan', req.params.id, { name, card_type }, req.ip);
+    if (!result.rows[0]) return res.status(404).json({ error: 'Clan not found' });
+    await audit('clan_updated', req.admin.username, 'clan', req.params.id, { name, discord_id, card_type }, req.ip);
     res.json(result.rows[0]);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
