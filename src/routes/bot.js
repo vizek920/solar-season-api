@@ -52,13 +52,19 @@ router.get('/tasks', authBot, async (req, res) => {
 
 // إرسال تقديم عبر البوت
 router.post('/submit', authBot, async (req, res) => {
-  const { task_id, clan_discord_id, content, image_url } = req.body;
-  if (!task_id || !clan_discord_id) return res.status(400).json({ error: 'Missing fields' });
+  const { task_id, clan_discord_id, clan_id, content, image_url } = req.body;
+  if (!task_id || (!clan_discord_id && !clan_id)) return res.status(400).json({ error: 'Missing fields' });
 
   try {
-    const clanResult = await pool.query('SELECT id, name FROM clans WHERE discord_id = $1', [clan_discord_id]);
-    if (!clanResult.rows[0]) return res.status(404).json({ error: 'Clan not found' });
-    const clan = clanResult.rows[0];
+    let clan;
+    if (clan_id) {
+      const r = await pool.query('SELECT id, name FROM clans WHERE id = $1 AND is_active = true', [clan_id]);
+      clan = r.rows[0];
+    } else {
+      const r = await pool.query('SELECT id, name FROM clans WHERE discord_id = $1 AND is_active = true', [clan_discord_id]);
+      clan = r.rows[0];
+    }
+    if (!clan) return res.status(404).json({ error: 'Clan not found — تأكد من إضافة Role ID الكلان في الموقع' });
 
     const taskResult = await pool.query(
       'SELECT * FROM tasks WHERE id = $1 AND is_active = true AND is_frozen = false',
@@ -76,6 +82,7 @@ router.post('/submit', authBot, async (req, res) => {
 
     res.json({ success: true, submission_id: result.rows[0].id });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
