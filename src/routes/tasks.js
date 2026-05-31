@@ -61,13 +61,15 @@ router.get('/:id', async (req, res) => {
 
 // إنشاء مهمة (أدمن)
 router.post('/', authAdmin, async (req, res) => {
-  const { season_id, title, description, difficulty, xp_reward, card_category, task_type, deadline } = req.body;
+  const { season_id, title, description, difficulty, xp_reward, reward_type, reward_amount, card_category, task_type, deadline } = req.body;
   if (!season_id || !title) return res.status(400).json({ error: 'season_id and title required' });
   try {
+    const finalRewardType = reward_type || 'xp';
+    const finalRewardAmount = reward_amount || xp_reward || 0;
     const result = await pool.query(
-      `INSERT INTO tasks (season_id, title, description, difficulty, xp_reward, card_category, task_type, deadline, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [season_id, title, description, difficulty || 1, xp_reward || 0, card_category || 'all', task_type || 'text', deadline || null, req.admin.id]
+      `INSERT INTO tasks (season_id, title, description, difficulty, xp_reward, reward_type, reward_amount, card_category, task_type, deadline, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [season_id, title, description, difficulty || 1, finalRewardAmount, finalRewardType, finalRewardAmount, card_category || 'all', task_type || 'text', deadline || null, req.admin.id]
     );
     const clansQuery = card_category && card_category !== 'all'
       ? 'SELECT id FROM clans WHERE card_type = $1 AND is_active = true'
@@ -220,4 +222,3 @@ router.post('/submissions/:submissionId/review', authAdmin, async (req, res) => 
 });
 
 module.exports = router;
- 
