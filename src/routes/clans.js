@@ -179,6 +179,72 @@ router.patch('/:id/eliminate', authAdmin, async (req, res) => {
   }
 });
 
+// إدارة القلوب
+router.patch('/:id/hearts', authAdmin, async (req, res) => {
+  const { amount, reason } = req.body;
+  if (amount === undefined) return res.status(400).json({ error: 'Amount required' });
+  try {
+    const result = await pool.query(
+      'UPDATE clans SET hearts = GREATEST(0, hearts + $1) WHERE id = $2 RETURNING hearts, name, is_eliminated',
+      [amount, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Clan not found' });
+
+    // إقصاء تلقائي عند صفر قلوب
+    if (result.rows[0].hearts === 0 && amount < 0) {
+      await pool.query('UPDATE clans SET is_eliminated = true WHERE id = $1', [req.params.id]);
+      await pool.query(
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '⚠️ تم إقصاؤك!', $2, 'danger')`,
+        [req.params.id, `نفدت قلوبك! تم إقصاء كلانك. ${reason || ''}`]
+      );
+    } else if (amount < 0) {
+      await pool.query(
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '💔 خسرت قلباً!', $2, 'warning')`,
+        [req.params.id, `تم خصم قلب من كلانك. ${reason || ''} — تبقى ${result.rows[0].hearts} قلب`]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '❤️ حصلت على قلب!', $2, 'success')`,
+        [req.params.id, `تم إضافة ${amount} قلب لكلانك!`]
+      );
+    }
+
+    await audit('hearts_changed', req.admin.username, 'clan', req.params.id, { amount, reason }, req.ip);
+    res.json({ hearts: result.rows[0].hearts, eliminated: result.rows[0].hearts === 0 && amount < 0 });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// منح جوكر من الموقع
+router.post('/:id/joker', authAdmin, async (req, res) => {
+  try {
+    const season = await pool.query('SELECT id FROM seasons WHERE is_active = true LIMIT 1');
+    if (!season.rows[0]) return res.status(400).json({ error: 'No active season' });
+
+    const existing = await pool.query(
+      'SELECT id FROM joker_cards WHERE clan_id = $1 AND season_id = $2',
+      [req.params.id, season.rows[0].id]
+    );
+    if (existing.rows[0]) return res.status(400).json({ error: 'الكلان لديه جوكر بالفعل' });
+
+    await pool.query(
+      'INSERT INTO joker_cards (clan_id, season_id, effect) VALUES ($1, $2, $3)',
+      [req.params.id, season.rows[0].id, 'random']
+    );
+
+    await pool.query(
+      `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '🃏 حصلت على الجوكر!', $2, 'success')`,
+      [req.params.id, 'تم منحك بطاقة الجوكر السرية! استخدمها بحكمة عبر أمر /جوكر في Discord']
+    );
+
+    await audit('joker_granted', req.admin.username, 'clan', req.params.id, null, req.ip);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.patch('/:id', authAdmin, async (req, res) => {
   const { name, discord_id, logo_url, card_type } = req.body;
   try {
