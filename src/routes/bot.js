@@ -2,11 +2,11 @@ const router = require('express').Router();
 const pool = require('../db');
 const { authBot } = require('../middleware/auth');
 
-// الحصول على الليدربورد (للبوت)
+// الليدربورد
 router.get('/leaderboard', authBot, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT name, card_type, xp, immunity_count, is_eliminated,
+      SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url, discord_id, hearts,
              RANK() OVER (ORDER BY xp DESC) as rank
       FROM clans WHERE is_active = true ORDER BY xp DESC LIMIT 20
     `);
@@ -16,11 +16,11 @@ router.get('/leaderboard', authBot, async (req, res) => {
   }
 });
 
-// الحصول على معلومات كلان بـ Discord ID
+// كلان بـ Role ID
 router.get('/clan/:discordId', authBot, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, card_type, xp, immunity_count, is_eliminated,
+      `SELECT id, name, card_type, xp, immunity_count, is_eliminated, discord_id, hearts,
               RANK() OVER (ORDER BY xp DESC) as rank
        FROM clans WHERE discord_id = $1 AND is_active = true`,
       [req.params.discordId]
@@ -32,12 +32,12 @@ router.get('/clan/:discordId', authBot, async (req, res) => {
   }
 });
 
-// الحصول على المهام النشطة (للبوت)
+// المهام النشطة
 router.get('/tasks', authBot, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT t.id, t.title, t.description, t.xp_reward, t.difficulty,
-             t.card_category, t.deadline, t.task_type
+             t.card_category, t.deadline, t.task_type, t.reward_type, t.reward_amount
       FROM tasks t
       JOIN seasons s ON t.season_id = s.id
       WHERE t.is_active = true AND t.is_frozen = false AND s.is_active = true
@@ -50,7 +50,17 @@ router.get('/tasks', authBot, async (req, res) => {
   }
 });
 
-// إرسال تقديم عبر البوت
+// السيزون النشط
+router.get('/season', authBot, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM seasons WHERE is_active = true LIMIT 1');
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// إرسال تقديم
 router.post('/submit', authBot, async (req, res) => {
   const { task_id, clan_discord_id, clan_id, content, image_url } = req.body;
   if (!task_id || (!clan_discord_id && !clan_id)) return res.status(400).json({ error: 'Missing fields' });
@@ -64,7 +74,7 @@ router.post('/submit', authBot, async (req, res) => {
       const r = await pool.query('SELECT id, name FROM clans WHERE discord_id = $1 AND is_active = true', [clan_discord_id]);
       clan = r.rows[0];
     }
-    if (!clan) return res.status(404).json({ error: 'Clan not found — تأكد من إضافة Role ID الكلان في الموقع' });
+    if (!clan) return res.status(404).json({ error: 'Clan not found' });
 
     const taskResult = await pool.query(
       'SELECT * FROM tasks WHERE id = $1 AND is_active = true AND is_frozen = false',
@@ -72,13 +82,28 @@ router.post('/submit', authBot, async (req, res) => {
     );
     if (!taskResult.rows[0]) return res.status(404).json({ error: 'Task not found or frozen' });
 
+    // التحقق من عدم التقديم مسبقاً
+    const existing = await pool.query(
+      "SELECT id, status FROM task_submissions WHERE task_id = $1 AND clan_id = $2",
+      [task_id, clan.id]
+    );
+    if (existing.rows[0] && existing.rows[0].status === 'approved') {
+      return res.status(400).json({ error: 'already_approved', message: 'تم قبول هذه المهمة مسبقاً' });
+    }
+
     const result = await pool.query(
       `INSERT INTO task_submissions (task_id, clan_id, content, image_url)
        VALUES ($1, $2, $3, $4)
-       ON CONFLICT (task_id, clan_id) DO UPDATE SET content = $3, image_url = $4, status = 'pending', submitted_at = NOW()
+       ON CONFLICT (task_id, clan_id) DO UPDATE 
+       SET content = $3, image_url = $4, status = 'pending', submitted_at = NOW()
+       WHERE task_submissions.status = 'rejected'
        RETURNING *`,
       [task_id, clan.id, content || null, image_url || null]
     );
+
+    if (!result.rows[0]) {
+      return res.status(400).json({ error: 'already_submitted', message: 'لقد قدمت هذه المهمة بالفعل وهي قيد المراجعة' });
+    }
 
     res.json({ success: true, submission_id: result.rows[0].id });
   } catch (err) {
@@ -96,9 +121,11 @@ router.post('/review', authBot, async (req, res) => {
     await pool.query('BEGIN');
 
     const subResult = await pool.query(
-      `SELECT ts.*, t.xp_reward, t.title, c.name as clan_name
-       FROM task_submissions ts 
-       JOIN tasks t ON ts.task_id = t.id 
+      `SELECT ts.*, t.xp_reward, t.title, t.reward_type, t.reward_amount,
+              c.name as clan_name, c.id as clan_id, c.discord_id as clan_discord_id,
+              c.hearts, c.immunity_count
+       FROM task_submissions ts
+       JOIN tasks t ON ts.task_id = t.id
        JOIN clans c ON ts.clan_id = c.id
        WHERE ts.id = $1`,
       [submission_id]
@@ -111,27 +138,76 @@ router.post('/review', authBot, async (req, res) => {
 
     await pool.query(
       'INSERT INTO task_reviews (submission_id, reviewer_discord_id, is_approved, note) VALUES ($1, $2, $3, $4)',
-      [submission_id, reviewer_tag || 'Discord Bot', is_approved, note || null]
+      [submission_id, reviewer_tag || 'Discord', is_approved, note || null]
     );
 
+    let rewardInfo = {};
+
     if (is_approved) {
-      await pool.query('UPDATE clans SET xp = xp + $1 WHERE id = $2', [sub.xp_reward, sub.clan_id]);
+      const rewardType = sub.reward_type || 'xp';
+      const rewardAmount = sub.reward_amount || sub.xp_reward || 0;
+
+      if (rewardType === 'xp') {
+        await pool.query('UPDATE clans SET xp = xp + $1 WHERE id = $2', [rewardAmount, sub.clan_id]);
+        await pool.query(
+          'INSERT INTO xp_log (clan_id, amount, reason, changed_by, task_id) VALUES ($1, $2, $3, $4, $5)',
+          [sub.clan_id, rewardAmount, `Task: ${sub.title}`, reviewer_tag || 'Discord', sub.task_id]
+        );
+        rewardInfo = { type: 'xp', amount: rewardAmount };
+
+      } else if (rewardType === 'immunity') {
+        await pool.query('UPDATE clans SET immunity_count = immunity_count + $1 WHERE id = $2', [rewardAmount, sub.clan_id]);
+        await pool.query(
+          'INSERT INTO immunity_log (clan_id, action, amount, reason, used_by) VALUES ($1, $2, $3, $4, $5)',
+          [sub.clan_id, 'gained', rewardAmount, `Task reward: ${sub.title}`, reviewer_tag || 'Discord']
+        );
+        rewardInfo = { type: 'immunity', amount: rewardAmount };
+
+      } else if (rewardType === 'hearts') {
+        await pool.query('UPDATE clans SET hearts = hearts + $1 WHERE id = $2', [rewardAmount, sub.clan_id]);
+        rewardInfo = { type: 'hearts', amount: rewardAmount };
+
+      } else if (rewardType === 'joker') {
+        // التحقق إن الكلان ما عنده جوكر
+        const season = await pool.query('SELECT id FROM seasons WHERE is_active = true LIMIT 1');
+        if (season.rows[0]) {
+          const existingJoker = await pool.query(
+            'SELECT id FROM joker_cards WHERE clan_id = $1 AND season_id = $2',
+            [sub.clan_id, season.rows[0].id]
+          );
+          if (!existingJoker.rows[0]) {
+            await pool.query(
+              'INSERT INTO joker_cards (clan_id, season_id, effect) VALUES ($1, $2, $3)',
+              [sub.clan_id, season.rows[0].id, 'random']
+            );
+          }
+        }
+        rewardInfo = { type: 'joker' };
+      }
+
+      // إشعار للكلان
       await pool.query(
-        'INSERT INTO xp_log (clan_id, amount, reason, changed_by, task_id) VALUES ($1, $2, $3, $4, $5)',
-        [sub.clan_id, sub.xp_reward, `Task: ${sub.title}`, reviewer_tag || 'Discord', sub.task_id]
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, 'success')`,
+        [sub.clan_id, '✅ تم قبول إجابتك!',
+         `تهانينا! إجابتك على "${sub.title}" قُبلت وحصلت على ${rewardType === 'xp' ? rewardAmount + ' XP' : rewardType === 'immunity' ? 'حصانة 🛡' : rewardType === 'hearts' ? 'قلب ❤️' : 'بطاقة جوكر 🃏'}`]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, 'danger')`,
+        [sub.clan_id, '❌ تم رفض إجابتك',
+         `للأسف إجابتك على "${sub.title}" رُفضت. ${note || ''}`]
       );
     }
 
-    await pool.query(
-      `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, $4)`,
-      [sub.clan_id,
-       is_approved ? '✅ تم قبول إجابتك!' : '❌ تم رفض إجابتك',
-       is_approved ? `تهانينا! إجابتك على "${sub.title}" قُبلت وحصلت على ${sub.xp_reward} XP` : `للأسف إجابتك على "${sub.title}" رُفضت. ${note || ''}`,
-       is_approved ? 'success' : 'danger']
-    );
-
     await pool.query('COMMIT');
-    res.json({ success: true, xp_awarded: is_approved ? sub.xp_reward : 0, clan: sub.clan_name });
+    res.json({
+      success: true,
+      status: newStatus,
+      reward: rewardInfo,
+      clan_name: sub.clan_name,
+      clan_discord_id: sub.clan_discord_id,
+      task_title: sub.title
+    });
   } catch (err) {
     await pool.query('ROLLBACK');
     console.error(err);
@@ -139,14 +215,208 @@ router.post('/review', authBot, async (req, res) => {
   }
 });
 
-// السيزون النشط (للبوت)
-router.get('/season', authBot, async (req, res) => {
+// خصم قلب من كلان (عند عدم إكمال مهمة)
+router.post('/deduct-heart', authBot, async (req, res) => {
+  const { clan_id, reason } = req.body;
   try {
-    const result = await pool.query('SELECT * FROM seasons WHERE is_active = true LIMIT 1');
-    res.json(result.rows[0] || null);
+    const result = await pool.query(
+      'UPDATE clans SET hearts = GREATEST(0, hearts - 1) WHERE id = $1 RETURNING hearts, name, discord_id, is_eliminated',
+      [clan_id]
+    );
+    const clan = result.rows[0];
+    if (!clan) return res.status(404).json({ error: 'Clan not found' });
+
+    // إقصاء تلقائي عند صفر قلوب
+    if (clan.hearts === 0) {
+      await pool.query('UPDATE clans SET is_eliminated = true WHERE id = $1', [clan_id]);
+      await pool.query(
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '⚠️ تم إقصاؤك!', $2, 'danger')`,
+        [clan_id, `نفدت قلوبك! تم إقصاء كلانك من السيزون. ${reason || ''}`]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '💔 خسرت قلباً!', $2, 'warning')`,
+        [clan_id, `تم خصم قلب من كلانك. ${reason || ''} — تبقى لديك ${clan.hearts} قلب`]
+      );
+    }
+
+    res.json({ hearts: clan.hearts, eliminated: clan.hearts === 0, clan_discord_id: clan.discord_id, clan_name: clan.name });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// استخدام الجوكر
+router.post('/use-joker', authBot, async (req, res) => {
+  const { clan_id } = req.body;
+  try {
+    const season = await pool.query('SELECT id FROM seasons WHERE is_active = true LIMIT 1');
+    if (!season.rows[0]) return res.status(400).json({ error: 'No active season' });
+
+    const joker = await pool.query(
+      'SELECT * FROM joker_cards WHERE clan_id = $1 AND season_id = $2 AND is_revealed = false',
+      [clan_id, season.rows[0].id]
+    );
+    if (!joker.rows[0]) return res.status(400).json({ error: 'No joker available' });
+
+    // تأثيرات عشوائية
+    const effects = ['immunity', 'hearts', 'xp_boost', 'elimination_escape'];
+    const effect = effects[Math.floor(Math.random() * effects.length)];
+
+    await pool.query(
+      'UPDATE joker_cards SET is_revealed = true, effect = $1, revealed_at = NOW() WHERE id = $2',
+      [effect, joker.rows[0].id]
+    );
+
+    // تطبيق التأثير
+    let effectResult = {};
+    if (effect === 'immunity') {
+      await pool.query('UPDATE clans SET immunity_count = immunity_count + 1 WHERE id = $1', [clan_id]);
+      effectResult = { effect: 'immunity', description: '🛡 حصلت على حصانة!' };
+    } else if (effect === 'hearts') {
+      await pool.query('UPDATE clans SET hearts = hearts + 2 WHERE id = $1', [clan_id]);
+      effectResult = { effect: 'hearts', description: '❤️ حصلت على قلبين إضافيين!' };
+    } else if (effect === 'xp_boost') {
+      await pool.query('UPDATE clans SET xp = xp + 500 WHERE id = $1', [clan_id]);
+      await pool.query(
+        'INSERT INTO xp_log (clan_id, amount, reason, changed_by) VALUES ($1, 500, $2, $3)',
+        [clan_id, 'Joker Card Effect', 'Bot']
+      );
+      effectResult = { effect: 'xp_boost', description: '⚡ حصلت على 500 XP إضافي!' };
+    } else if (effect === 'elimination_escape') {
+      await pool.query('UPDATE clans SET is_eliminated = false, hearts = 1 WHERE id = $1', [clan_id]);
+      effectResult = { effect: 'elimination_escape', description: '🔄 عدت للمنافسة مع قلب واحد!' };
+    }
+
+    await pool.query(
+      `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '🃏 تم كشف الجوكر!', $2, 'success')`,
+      [clan_id, `تأثير الجوكر: ${effectResult.description}`]
+    );
+
+    res.json({ success: true, ...effectResult });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// إضافة جوكر يدوياً من الأدمن
+router.post('/grant-joker', authBot, async (req, res) => {
+  const { clan_id } = req.body;
+  try {
+    const season = await pool.query('SELECT id FROM seasons WHERE is_active = true LIMIT 1');
+    if (!season.rows[0]) return res.status(400).json({ error: 'No active season' });
+
+    await pool.query(
+      `INSERT INTO joker_cards (clan_id, season_id, effect) VALUES ($1, $2, 'random')
+       ON CONFLICT DO NOTHING`,
+      [clan_id, season.rows[0].id]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Big Screen
+router.get('/bigscreen', async (req, res) => {
+  try {
+    const [clans, season, tasks] = await Promise.all([
+      pool.query(`
+        SELECT id, name, card_type, xp, immunity_count, is_eliminated, hearts,
+               RANK() OVER (ORDER BY xp DESC) as rank
+        FROM clans WHERE is_active = true ORDER BY xp DESC LIMIT 20
+      `),
+      pool.query('SELECT * FROM seasons WHERE is_active = true LIMIT 1'),
+      pool.query(`
+        SELECT id, title, card_category, xp_reward, reward_type, difficulty, deadline
+        FROM tasks WHERE is_active = true AND is_frozen = false
+        AND (deadline IS NULL OR deadline > NOW())
+        ORDER BY created_at DESC LIMIT 5
+      `)
+    ]);
+    res.json({ clans: clans.rows, season: season.rows[0] || null, tasks: tasks.rows });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
 module.exports = router;
+
+// إنشاء تحدي
+router.post('/challenge', authBot, async (req, res) => {
+  const { challenger_clan_id, target_name, xp_bet, challenger_discord_id } = req.body;
+  try {
+    const target = await pool.query(
+      "SELECT id, name, discord_id FROM clans WHERE LOWER(name) = LOWER($1) AND is_active = true",
+      [target_name]
+    );
+    if (!target.rows[0]) return res.status(404).json({ error: 'الكلان غير موجود' });
+    if (target.rows[0].id === challenger_clan_id) return res.status(400).json({ error: 'لا يمكنك تحدي نفسك' });
+
+    const challenger = await pool.query('SELECT name FROM clans WHERE id = $1', [challenger_clan_id]);
+
+    const result = await pool.query(
+      `INSERT INTO challenges (challenger_clan_id, challenged_clan_id, xp_bet, challenger_discord_id, challenged_discord_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [challenger_clan_id, target.rows[0].id, xp_bet, challenger_discord_id, target.rows[0].discord_id]
+    );
+
+    res.json({
+      success: true,
+      challenge_id: result.rows[0].id,
+      target_discord_id: target.rows[0].discord_id,
+      challenger: challenger.rows[0].name,
+      challenged: target.rows[0].name,
+      xp_bet
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// قبول تحدي
+router.post('/challenge/accept', authBot, async (req, res) => {
+  const { challenge_id, discord_id } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE challenges SET status = 'accepted' WHERE id = $1 AND status = 'pending' RETURNING *`,
+      [challenge_id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Challenge not found' });
+    
+    const ch = result.rows[0];
+    const [c1, c2] = await Promise.all([
+      pool.query('SELECT name FROM clans WHERE id = $1', [ch.challenger_clan_id]),
+      pool.query('SELECT name FROM clans WHERE id = $1', [ch.challenged_clan_id])
+    ]);
+
+    res.json({ success: true, challenger: c1.rows[0].name, challenged: c2.rows[0].name, xp_bet: ch.xp_bet });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// إنهاء تحدي (أدمن)
+router.post('/challenge/complete', authBot, async (req, res) => {
+  const { challenge_id, winner_clan_id } = req.body;
+  try {
+    await pool.query('BEGIN');
+    const ch = await pool.query('SELECT * FROM challenges WHERE id = $1', [challenge_id]);
+    if (!ch.rows[0]) { await pool.query('ROLLBACK'); return res.status(404).json({ error: 'Not found' }); }
+
+    const loserId = ch.rows[0].challenger_clan_id === winner_clan_id
+      ? ch.rows[0].challenged_clan_id : ch.rows[0].challenger_clan_id;
+
+    await pool.query('UPDATE clans SET xp = xp + $1 WHERE id = $2', [ch.rows[0].xp_bet, winner_clan_id]);
+    await pool.query('UPDATE clans SET xp = GREATEST(0, xp - $1) WHERE id = $2', [ch.rows[0].xp_bet, loserId]);
+    await pool.query(`UPDATE challenges SET status = 'completed', winner_clan_id = $1, completed_at = NOW() WHERE id = $2`, [winner_clan_id, challenge_id]);
+
+    await pool.query('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await pool.query('ROLLBACK');
+    res.status(500).json({ error: 'Server error' });
+  }
+});
