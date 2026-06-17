@@ -1,5 +1,48 @@
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const https = require('https');
+
+// التحقق من Cloudflare Turnstile
+const verifyCaptcha = async (token, ip) => {
+  return new Promise((resolve) => {
+    if (!token) { resolve(false); return; }
+    const body = JSON.stringify({
+      secret: process.env.TURNSTILE_SECRET,
+      response: token,
+      remoteip: ip
+    });
+    const options = {
+      hostname: 'challenges.cloudflare.com',
+      port: 443, path: '/turnstile/v0/siteverify',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data).success === true); }
+        catch { resolve(false); }
+      });
+    });
+    req.on('error', () => resolve(false));
+    req.write(body); req.end();
+  });
+};
+
+const captchaMiddleware = async (req, res, next) => {
+  // تخطي في بيئة التطوير
+  if (process.env.NODE_ENV === 'development') return next();
+  
+  const token = req.body?.captcha_token;
+  const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
+  
+  const valid = await verifyCaptcha(token, ip);
+  if (!valid) {
+    return res.status(403).json({ error: 'captcha_failed', message: 'فشل التحقق الأمني. حاول مرة أخرى.' });
+  }
+  next();
+};
 
 // Rate Limiter لتسجيل الدخول — 5 محاولات كل 15 دقيقة
 const loginLimiter = rateLimit({
@@ -85,4 +128,4 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-module.exports = { loginLimiter, apiLimiter, botLimiter, securityHeaders, trackLoginAttempt, checkBlocked };
+module.exports = { loginLimiter, apiLimiter, botLimiter, securityHeaders, trackLoginAttempt, checkBlocked, captchaMiddleware };
