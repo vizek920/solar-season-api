@@ -59,3 +59,4 @@ router.patch('/clan/:id/password', async (req, res) => {
 });
 
 module.exports = router;
+
