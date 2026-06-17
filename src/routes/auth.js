@@ -3,9 +3,9 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const { audit } = require('../utils/audit');
-const { checkBlocked, trackLoginAttempt } = require('../middleware/security');
+const { checkBlocked, trackLoginAttempt, captchaMiddleware } = require('../middleware/security');
 
-router.post('/clan/login', checkBlocked, async (req, res) => {
+router.post('/clan/login', checkBlocked, captchaMiddleware, async (req, res) => {
   const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'البريد الإلكتروني وكلمة السر مطلوبان' });
@@ -22,7 +22,7 @@ router.post('/clan/login', checkBlocked, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Server error' }); }
 });
 
-router.post('/admin/login', checkBlocked, async (req, res) => {
+router.post('/admin/login', checkBlocked, captchaMiddleware, async (req, res) => {
   const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'البريد الإلكتروني وكلمة السر مطلوبان' });
@@ -59,4 +59,3 @@ router.patch('/clan/:id/password', async (req, res) => {
 });
 
 module.exports = router;
-
