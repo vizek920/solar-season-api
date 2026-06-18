@@ -4,11 +4,11 @@ const pool = require('../db');
 const { authClan, authAdmin, authSuperAdmin } = require('../middleware/auth');
 const { audit } = require('../utils/audit');
 
-// الحصول على الليدربورد العام
+// ===== الليدربورد العام =====
 router.get('/leaderboard', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url, discord_id,
+      SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url, discord_id, hearts,
              RANK() OVER (ORDER BY xp DESC) as rank
       FROM clans WHERE is_active = true ORDER BY xp DESC
     `);
@@ -18,12 +18,12 @@ router.get('/leaderboard', async (req, res) => {
   }
 });
 
-// ===== ME ROUTES (يجب أن تكون قبل /:id) =====
+// ===== ME ROUTES (قبل /:id) =====
 
 router.get('/me', authClan, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, email, card_type, discord_id, logo_url, xp,
+      `SELECT id, name, email, card_type, discord_id, logo_url, xp, hearts,
               immunity_count, is_eliminated, created_at,
               RANK() OVER (ORDER BY xp DESC) as rank
        FROM clans WHERE id = $1`,
@@ -61,11 +61,12 @@ router.get('/me/immunity-log', authClan, async (req, res) => {
   }
 });
 
-// الحصول على ملف كلان معين (عام) - بعد /me
+// ===== CLAN BY ID =====
+
 router.get('/:id', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url, created_at,
+      `SELECT id, name, card_type, xp, immunity_count, is_eliminated, logo_url, hearts, created_at,
               RANK() OVER (ORDER BY xp DESC) as rank
        FROM clans WHERE id = $1 AND is_active = true`,
       [req.params.id]
@@ -103,8 +104,25 @@ router.get('/:id/xp-log', async (req, res) => {
   }
 });
 
+// جوكر الكلان (عام)
+router.get('/:id/joker', async (req, res) => {
+  try {
+    const season = await pool.query('SELECT id FROM seasons WHERE is_active = true LIMIT 1');
+    if (!season.rows[0]) return res.status(404).json({ error: 'No active season' });
+    const result = await pool.query(
+      'SELECT * FROM joker_cards WHERE clan_id = $1 AND season_id = $2',
+      [req.params.id, season.rows[0].id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'No joker' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // ===== ADMIN ROUTES =====
 
+// إنشاء كلان
 router.post('/', authAdmin, async (req, res) => {
   const { name, email, password, card_type, discord_id } = req.body;
   if (!name || !email || !password || !card_type)
@@ -112,8 +130,8 @@ router.post('/', authAdmin, async (req, res) => {
   try {
     const hash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO clans (name, email, password_hash, card_type, discord_id)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, card_type`,
+      `INSERT INTO clans (name, email, password_hash, card_type, discord_id, hearts)
+       VALUES ($1, $2, $3, $4, $5, 1) RETURNING id, name, email, card_type`,
       [name, email.toLowerCase(), hash, card_type, discord_id || null]
     );
     await audit('clan_created', req.admin.username, 'clan', result.rows[0].id, { name, card_type }, req.ip);
@@ -124,6 +142,28 @@ router.post('/', authAdmin, async (req, res) => {
   }
 });
 
+// تعديل كلان
+router.patch('/:id', authAdmin, async (req, res) => {
+  const { name, discord_id, logo_url, card_type } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE clans SET
+        name = COALESCE(NULLIF($1, ''), name),
+        discord_id = CASE WHEN $2::text IS NOT NULL THEN NULLIF($2, '') ELSE discord_id END,
+        logo_url = COALESCE(NULLIF($3, ''), logo_url),
+        card_type = COALESCE(NULLIF($4, ''), card_type)
+       WHERE id = $5 RETURNING id, name, card_type, discord_id`,
+      [name || null, discord_id !== undefined ? discord_id : null, logo_url || null, card_type || null, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Clan not found' });
+    await audit('clan_updated', req.admin.username, 'clan', req.params.id, { name, discord_id, card_type }, req.ip);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// تعديل XP
 router.patch('/:id/xp', authAdmin, async (req, res) => {
   const { amount, reason } = req.body;
   if (amount === undefined) return res.status(400).json({ error: 'Amount required' });
@@ -147,6 +187,7 @@ router.patch('/:id/xp', authAdmin, async (req, res) => {
   }
 });
 
+// تعديل الحصانة
 router.patch('/:id/immunity', authAdmin, async (req, res) => {
   const { action, amount = 1, reason } = req.body;
   if (!action) return res.status(400).json({ error: 'Action required' });
@@ -168,29 +209,17 @@ router.patch('/:id/immunity', authAdmin, async (req, res) => {
   }
 });
 
-router.patch('/:id/eliminate', authAdmin, async (req, res) => {
-  const { is_eliminated } = req.body;
-  try {
-    await pool.query('UPDATE clans SET is_eliminated = $1 WHERE id = $2', [is_eliminated, req.params.id]);
-    await audit('clan_elimination_changed', req.admin.username, 'clan', req.params.id, { is_eliminated }, req.ip);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// إدارة القلوب
+// تعديل القلوب
 router.patch('/:id/hearts', authAdmin, async (req, res) => {
   const { amount, reason } = req.body;
   if (amount === undefined) return res.status(400).json({ error: 'Amount required' });
   try {
     const result = await pool.query(
-      'UPDATE clans SET hearts = GREATEST(0, hearts + $1) WHERE id = $2 RETURNING hearts, name, is_eliminated',
+      'UPDATE clans SET hearts = GREATEST(0, hearts + $1) WHERE id = $2 RETURNING hearts, name, discord_id',
       [amount, req.params.id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Clan not found' });
 
-    // إقصاء تلقائي عند صفر قلوب
     if (result.rows[0].hearts === 0 && amount < 0) {
       await pool.query('UPDATE clans SET is_eliminated = true WHERE id = $1', [req.params.id]);
       await pool.query(
@@ -200,7 +229,7 @@ router.patch('/:id/hearts', authAdmin, async (req, res) => {
     } else if (amount < 0) {
       await pool.query(
         `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '💔 خسرت قلباً!', $2, 'warning')`,
-        [req.params.id, `تم خصم قلب من كلانك. ${reason || ''} — تبقى ${result.rows[0].hearts} قلب`]
+        [req.params.id, `تم خصم قلب. ${reason || ''} — تبقى ${result.rows[0].hearts} قلب`]
       );
     } else {
       await pool.query(
@@ -216,7 +245,19 @@ router.patch('/:id/hearts', authAdmin, async (req, res) => {
   }
 });
 
-// منح جوكر من الموقع
+// إقصاء / إعادة كلان
+router.patch('/:id/eliminate', authAdmin, async (req, res) => {
+  const { is_eliminated } = req.body;
+  try {
+    await pool.query('UPDATE clans SET is_eliminated = $1 WHERE id = $2', [is_eliminated, req.params.id]);
+    await audit('clan_elimination_changed', req.admin.username, 'clan', req.params.id, { is_eliminated }, req.ip);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// منح جوكر
 router.post('/:id/joker', authAdmin, async (req, res) => {
   try {
     const season = await pool.query('SELECT id FROM seasons WHERE is_active = true LIMIT 1');
@@ -232,12 +273,10 @@ router.post('/:id/joker', authAdmin, async (req, res) => {
       'INSERT INTO joker_cards (clan_id, season_id, effect) VALUES ($1, $2, $3)',
       [req.params.id, season.rows[0].id, 'random']
     );
-
     await pool.query(
       `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, '🃏 حصلت على الجوكر!', $2, 'success')`,
-      [req.params.id, 'تم منحك بطاقة الجوكر السرية! استخدمها بحكمة عبر أمر /جوكر في Discord']
+      [req.params.id, 'تم منحك بطاقة الجوكر السرية! استخدمها بأمر /جوكر في Discord']
     );
-
     await audit('joker_granted', req.admin.username, 'clan', req.params.id, null, req.ip);
     res.json({ success: true });
   } catch (err) {
@@ -245,28 +284,7 @@ router.post('/:id/joker', authAdmin, async (req, res) => {
   }
 });
 
-router.patch('/:id', authAdmin, async (req, res) => {
-  const { name, discord_id, logo_url, card_type } = req.body;
-  try {
-    // نستخدم NULLIF لتجنب تخزين string فارغ
-    const result = await pool.query(
-      `UPDATE clans SET
-        name = COALESCE(NULLIF($1, ''), name),
-        discord_id = CASE WHEN $2::text IS NOT NULL THEN NULLIF($2, '') ELSE discord_id END,
-        logo_url = COALESCE(NULLIF($3, ''), logo_url),
-        card_type = COALESCE(NULLIF($4, ''), card_type)
-       WHERE id = $5 RETURNING id, name, card_type, discord_id`,
-      [name || null, discord_id !== undefined ? discord_id : null, logo_url || null, card_type || null, req.params.id]
-    );
-    if (!result.rows[0]) return res.status(404).json({ error: 'Clan not found' });
-    await audit('clan_updated', req.admin.username, 'clan', req.params.id, { name, discord_id, card_type }, req.ip);
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
+// حذف كلان
 router.delete('/:id', authSuperAdmin, async (req, res) => {
   try {
     await pool.query('UPDATE clans SET is_active = false WHERE id = $1', [req.params.id]);
