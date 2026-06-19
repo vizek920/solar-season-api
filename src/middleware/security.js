@@ -35,7 +35,7 @@ const captchaMiddleware = async (req, res, next) => {
   if (process.env.NODE_ENV === 'development') return next();
   
   const token = req.body?.captcha_token;
-  const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
+  const ip = req.ip;
   
   const valid = await verifyCaptcha(token, ip);
   if (!valid) {
@@ -101,7 +101,7 @@ const trackLoginAttempt = (ip, success) => {
 };
 
 const checkBlocked = (req, res, next) => {
-  const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  const ip = req.ip; // الآن دقيق بفضل trust proxy
   const record = loginAttempts.get(ip);
   if (record && record.attempts >= 5) {
     const now = Date.now();
