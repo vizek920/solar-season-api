@@ -15,6 +15,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_URL = process.env.API_URL || 'https://solar-season-api.onrender.com';
 
+// مهم جداً: نخبر Express أنه خلف proxy (Render) ليقرأ الـ IP الحقيقي
+app.set('trust proxy', 1);
+
 // ===== Security Headers =====
 app.use(securityHeaders);
 
