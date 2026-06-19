@@ -6,7 +6,7 @@ const { audit } = require('../utils/audit');
 const { checkBlocked, trackLoginAttempt, captchaMiddleware } = require('../middleware/security');
 
 router.post('/clan/login', checkBlocked, captchaMiddleware, async (req, res) => {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
+  const ip = req.ip;
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'البريد الإلكتروني وكلمة السر مطلوبان' });
   try {
@@ -23,7 +23,7 @@ router.post('/clan/login', checkBlocked, captchaMiddleware, async (req, res) => 
 });
 
 router.post('/admin/login', checkBlocked, captchaMiddleware, async (req, res) => {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
+  const ip = req.ip;
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'البريد الإلكتروني وكلمة السر مطلوبان' });
   try {
