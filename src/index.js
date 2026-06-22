@@ -64,7 +64,7 @@ app.get('/ping', (req, res) => res.json({ status: 'ok', time: new Date().toISOSt
 app.get('/', (req, res) => res.json({ name: 'Solar Season API', version: '1.0.0' }));
 
 // ===== CRON JOBS =====
-cron.schedule('* * * * *', async () => {
+cron.schedule('*/5 * * * *', async () => {
   try {
     const result = await pool.query(
       `UPDATE tasks SET is_frozen = true WHERE deadline < NOW() AND is_frozen = false AND is_active = true RETURNING id`
