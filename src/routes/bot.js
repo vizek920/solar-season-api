@@ -497,7 +497,8 @@ router.post('/penalty', authBot, async (req, res) => {
       immunity_count: clan.immunity_count
     });
   } catch (err) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Penalty endpoint error:', err.message);
+    res.status(500).json({ error: 'Server error', detail: err.message });
   }
 });
 
