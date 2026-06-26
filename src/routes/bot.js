@@ -37,7 +37,7 @@ router.get('/tasks', authBot, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT t.id, t.title, t.description, t.xp_reward, t.difficulty,
-             t.card_category, t.deadline, t.task_type, t.reward_type, t.reward_amount
+             t.card_category, t.deadline, t.created_at, t.task_type, t.reward_type, t.reward_amount
       FROM tasks t
       JOIN seasons s ON t.season_id = s.id
       WHERE t.is_active = true AND t.is_frozen = false AND s.is_active = true
@@ -448,6 +448,54 @@ router.get('/bigscreen', async (req, res) => {
       pool.query(`SELECT id, title, card_category, xp_reward, reward_type, difficulty, deadline FROM tasks WHERE is_active = true AND is_frozen = false AND (deadline IS NULL OR deadline > NOW()) ORDER BY created_at DESC LIMIT 5`)
     ]);
     res.json({ clans: clans.rows, season: season.rows[0] || null, tasks: tasks.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// خصم عقوبة موحّد: نقاط (xp) / قلوب (hearts) / دروع (shields=immunity_count)
+router.post('/penalty', authBot, async (req, res) => {
+  const { clan_id, type, amount, reason } = req.body;
+  const amt = Math.max(1, parseInt(amount, 10) || 1);
+  // العمود مُختار من قائمة ثابتة فقط (آمن ضد الحقن)
+  const column = type === 'xp' ? 'xp' : type === 'hearts' ? 'hearts' : type === 'shields' ? 'immunity_count' : null;
+  if (!clan_id || !column) return res.status(400).json({ error: 'invalid_request' });
+
+  try {
+    const result = await pool.query(
+      `UPDATE clans SET ${column} = GREATEST(0, ${column} - $2) WHERE id = $1
+       RETURNING name, discord_id, xp, hearts, immunity_count`,
+      [clan_id, amt]
+    );
+    const clan = result.rows[0];
+    if (!clan) return res.status(404).json({ error: 'Clan not found' });
+
+    let eliminated = false;
+    if (type === 'hearts' && clan.hearts === 0) {
+      eliminated = true;
+      await pool.query('UPDATE clans SET is_eliminated = true WHERE id = $1', [clan_id]);
+    }
+
+    const typeLabel = type === 'xp' ? `${amt} XP` : type === 'hearts' ? `${amt} قلب` : `${amt} درع`;
+    const title = eliminated ? '⚠️ تم إقصاؤك!' : '⚖️ عقوبة';
+    const message = eliminated
+      ? `نفدت قلوبك! ${reason || ''}`.trim()
+      : `تم خصم ${typeLabel}. ${reason || ''}`.trim();
+    await pool.query(
+      `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, $4)`,
+      [clan_id, title, message, eliminated ? 'danger' : 'warning']
+    );
+
+    res.json({
+      clan_name: clan.name,
+      clan_discord_id: clan.discord_id,
+      eliminated,
+      type,
+      amount: amt,
+      xp: clan.xp,
+      hearts: clan.hearts,
+      immunity_count: clan.immunity_count
+    });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
