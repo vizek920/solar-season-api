@@ -455,25 +455,30 @@ router.get('/bigscreen', async (req, res) => {
 
 // خصم عقوبة موحّد: نقاط (xp) / قلوب (hearts) / دروع (shields=immunity_count)
 router.post('/penalty', authBot, async (req, res) => {
-  const { clan_id, type, amount, reason } = req.body;
+  const { clan, type, amount, reason } = req.body;
   const amt = Math.max(1, parseInt(amount, 10) || 1);
   // العمود مُختار من قائمة ثابتة فقط (آمن ضد الحقن)
   const column = type === 'xp' ? 'xp' : type === 'hearts' ? 'hearts' : type === 'shields' ? 'immunity_count' : null;
-  if (!clan_id || !column) return res.status(400).json({ error: 'invalid_request' });
+  if (!clan || !column) return res.status(400).json({ error: 'invalid_request' });
+
+  // يقبل UUID أو اسم الكلان
+  const ref = String(clan).trim();
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+  const whereClause = isUuid ? 'id = $1' : 'LOWER(name) = LOWER($1)';
 
   try {
     const result = await pool.query(
-      `UPDATE clans SET ${column} = GREATEST(0, ${column} - $2) WHERE id = $1
-       RETURNING name, discord_id, xp, hearts, immunity_count`,
-      [clan_id, amt]
+      `UPDATE clans SET ${column} = GREATEST(0, ${column} - $2) WHERE ${whereClause}
+       RETURNING id, name, discord_id, xp, hearts, immunity_count`,
+      [ref, amt]
     );
-    const clan = result.rows[0];
-    if (!clan) return res.status(404).json({ error: 'Clan not found' });
+    const row = result.rows[0];
+    if (!row) return res.status(404).json({ error: 'Clan not found' });
 
     let eliminated = false;
-    if (type === 'hearts' && clan.hearts === 0) {
+    if (type === 'hearts' && row.hearts === 0) {
       eliminated = true;
-      await pool.query('UPDATE clans SET is_eliminated = true WHERE id = $1', [clan_id]);
+      await pool.query('UPDATE clans SET is_eliminated = true WHERE id = $1', [row.id]);
     }
 
     const typeLabel = type === 'xp' ? `${amt} XP` : type === 'hearts' ? `${amt} قلب` : `${amt} درع`;
@@ -483,22 +488,22 @@ router.post('/penalty', authBot, async (req, res) => {
       : `تم خصم ${typeLabel}. ${reason || ''}`.trim();
     await pool.query(
       `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, $4)`,
-      [clan_id, title, message, eliminated ? 'danger' : 'warning']
+      [row.id, title, message, eliminated ? 'danger' : 'warning']
     );
 
     res.json({
-      clan_name: clan.name,
-      clan_discord_id: clan.discord_id,
+      clan_name: row.name,
+      clan_discord_id: row.discord_id,
       eliminated,
       type,
       amount: amt,
-      xp: clan.xp,
-      hearts: clan.hearts,
-      immunity_count: clan.immunity_count
+      xp: row.xp,
+      hearts: row.hearts,
+      immunity_count: row.immunity_count
     });
   } catch (err) {
     console.error('Penalty endpoint error:', err.message);
-    res.status(500).json({ error: 'Server error', detail: err.message });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
