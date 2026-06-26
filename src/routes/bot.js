@@ -548,4 +548,43 @@ router.post('/reward', authBot, async (req, res) => {
   }
 });
 
+// ===== بيانات التذكيرات: مهام نشطة + الكلانات التي لم تنفّذها =====
+router.get('/reminders', authBot, async (req, res) => {
+  try {
+    const tasksRes = await pool.query(
+      `SELECT id, title, created_at, deadline FROM tasks
+       WHERE is_active = true AND deadline IS NOT NULL`
+    );
+    const tasks = tasksRes.rows;
+    if (tasks.length === 0) return res.json([]);
+
+    const clansRes = await pool.query(
+      `SELECT id, name, discord_id FROM clans
+       WHERE is_active = true AND is_eliminated = false AND discord_id IS NOT NULL`
+    );
+    const clans = clansRes.rows;
+
+    // أي تقديم (بأي حالة) = الكلان نفّذ المهمة
+    const subsRes = await pool.query(
+      `SELECT DISTINCT task_id, clan_id FROM task_submissions`
+    );
+    const submitted = new Set(subsRes.rows.map(r => `${r.task_id}:${r.clan_id}`));
+
+    const result = tasks.map(t => ({
+      id: t.id,
+      title: t.title,
+      created_at: t.created_at,
+      deadline: t.deadline,
+      pending_clans: clans
+        .filter(c => !submitted.has(`${t.id}:${c.id}`))
+        .map(c => ({ id: c.id, name: c.name, discord_id: c.discord_id }))
+    }));
+
+    res.json(result);
+  } catch (err) {
+    console.error('Reminders endpoint error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
