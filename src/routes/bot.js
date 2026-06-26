@@ -507,4 +507,45 @@ router.post('/penalty', authBot, async (req, res) => {
   }
 });
 
+// ===== زيادة نقاط/قلوب/دروع لكلان (عكس penalty) =====
+router.post('/reward', authBot, async (req, res) => {
+  const { clan, type, amount, reason } = req.body;
+  const amt = Math.max(1, parseInt(amount, 10) || 1);
+  const column = type === 'xp' ? 'xp' : type === 'hearts' ? 'hearts' : type === 'shields' ? 'immunity_count' : null;
+  if (!clan || !column) return res.status(400).json({ error: 'invalid_request' });
+
+  const ref = String(clan).trim();
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+  const whereClause = isUuid ? 'id = $1' : 'LOWER(name) = LOWER($1)';
+
+  try {
+    const result = await pool.query(
+      `UPDATE clans SET ${column} = ${column} + $2 WHERE ${whereClause}
+       RETURNING id, name, discord_id, xp, hearts, immunity_count`,
+      [ref, amt]
+    );
+    const row = result.rows[0];
+    if (!row) return res.status(404).json({ error: 'Clan not found' });
+
+    const typeLabel = type === 'xp' ? `${amt} XP` : type === 'hearts' ? `${amt} قلب` : `${amt} درع`;
+    await pool.query(
+      `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, $4)`,
+      [row.id, '🎁 مكافأة', `تمت إضافة ${typeLabel}. ${reason || ''}`.trim(), 'success']
+    );
+
+    res.json({
+      clan_name: row.name,
+      clan_discord_id: row.discord_id,
+      type,
+      amount: amt,
+      xp: row.xp,
+      hearts: row.hearts,
+      immunity_count: row.immunity_count
+    });
+  } catch (err) {
+    console.error('Reward endpoint error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;
