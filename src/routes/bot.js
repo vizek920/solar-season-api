@@ -37,7 +37,7 @@ router.get('/tasks', authBot, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT t.id, t.title, t.description, t.xp_reward, t.difficulty,
-             t.card_category, t.deadline, t.created_at, t.task_type, t.reward_type, t.reward_amount
+             t.card_category, t.deadline, t.created_at, t.task_type, t.reward_type, t.reward_amount, t.submission_type
       FROM tasks t
       JOIN seasons s ON t.season_id = s.id
       WHERE t.is_active = true AND t.is_frozen = false AND s.is_active = true
