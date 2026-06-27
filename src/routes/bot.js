@@ -587,4 +587,48 @@ router.get('/reminders', authBot, async (req, res) => {
   }
 });
 
+// ===== إنشاء مهمة من البوت (مرتبطة بالموقع) =====
+router.post('/create-task', authBot, async (req, res) => {
+  const { title, description, type, points, deadline_hours } = req.body;
+  if (!title) return res.status(400).json({ error: 'title_required' });
+
+  const stype = ['image', 'text', 'both'].includes(type) ? type : 'both';
+  const taskType = stype === 'image' ? 'image' : stype === 'text' ? 'text' : 'mixed';
+  const xp = Math.max(0, parseInt(points, 10) || 0);
+
+  let deadline = null;
+  const hrs = parseInt(deadline_hours, 10);
+  if (!isNaN(hrs) && hrs > 0) deadline = new Date(Date.now() + hrs * 3600 * 1000).toISOString();
+
+  try {
+    const seasonRes = await pool.query('SELECT id FROM seasons WHERE is_active = true LIMIT 1');
+    const season = seasonRes.rows[0];
+    if (!season) return res.status(400).json({ error: 'no_active_season' });
+
+    const adminRes = await pool.query('SELECT id FROM admins LIMIT 1');
+    const createdBy = adminRes.rows[0]?.id || null;
+
+    const result = await pool.query(
+      `INSERT INTO tasks (season_id, title, description, difficulty, xp_reward, reward_type, reward_amount, card_category, task_type, deadline, created_by, submission_type)
+       VALUES ($1, $2, $3, $4, $5, 'xp', $5, 'all', $6, $7, $8, $9) RETURNING *`,
+      [season.id, title, description || null, 3, xp, taskType, deadline, createdBy, stype]
+    );
+    const task = result.rows[0];
+
+    // إشعار الكلانات النشطة (مثل الموقع)
+    const clans = await pool.query('SELECT id FROM clans WHERE is_active = true');
+    for (const clan of clans.rows) {
+      await pool.query(
+        `INSERT INTO notifications (clan_id, title, message, type) VALUES ($1, $2, $3, 'info')`,
+        [clan.id, '🎯 مهمة جديدة!', `تم إضافة مهمة جديدة: ${title}`]
+      );
+    }
+
+    res.status(201).json({ task });
+  } catch (err) {
+    console.error('Create-task endpoint error:', err.message);
+    res.status(500).json({ error: 'Server error', detail: err.message });
+  }
+});
+
 module.exports = router;
