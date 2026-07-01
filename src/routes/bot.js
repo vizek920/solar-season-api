@@ -552,7 +552,7 @@ router.post('/reward', authBot, async (req, res) => {
 router.get('/reminders', authBot, async (req, res) => {
   try {
     const tasksRes = await pool.query(
-      `SELECT id, title, created_at, deadline FROM tasks
+      `SELECT id, title, created_at, deadline, reminded_half, reminded_hour FROM tasks
        WHERE is_active = true AND deadline IS NOT NULL`
     );
     const tasks = tasksRes.rows;
@@ -575,6 +575,8 @@ router.get('/reminders', authBot, async (req, res) => {
       title: t.title,
       created_at: t.created_at,
       deadline: t.deadline,
+      reminded_half: t.reminded_half,
+      reminded_hour: t.reminded_hour,
       pending_clans: clans
         .filter(c => !submitted.has(`${t.id}:${c.id}`))
         .map(c => ({ id: c.id, name: c.name, discord_id: c.discord_id }))
@@ -628,6 +630,20 @@ router.post('/create-task', authBot, async (req, res) => {
   } catch (err) {
     console.error('Create-task endpoint error:', err.message);
     res.status(500).json({ error: 'Server error', detail: err.message });
+  }
+});
+
+// ===== تعليم أن تذكيراً أُرسل (تتبّع دائم) =====
+router.post('/mark-reminded', authBot, async (req, res) => {
+  const { task_id, kind } = req.body;
+  const col = kind === 'half' ? 'reminded_half' : kind === 'hour' ? 'reminded_hour' : null;
+  if (!task_id || !col) return res.status(400).json({ error: 'invalid_request' });
+  try {
+    await pool.query(`UPDATE tasks SET ${col} = true WHERE id = $1`, [task_id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('mark-reminded error:', err.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
